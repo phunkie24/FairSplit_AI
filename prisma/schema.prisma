@@ -1,0 +1,323 @@
+// This is your Prisma schema file
+// Learn more: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  name          String?
+  image         String?
+  passwordHash  String?
+  emailVerified DateTime?
+  
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  
+  // Relations
+  accounts      Account[]
+  sessions      Session[]
+  groups        GroupMember[]
+  receipts      Receipt[]
+  debtsOwed     Debt[]        @relation("Debtor")
+  debtsOwing    Debt[]        @relation("Creditor")
+  transactions  Transaction[] @relation("TransactionFrom")
+  paidSplits    Split[]
+  auditLogs     AuditLog[]
+  
+  @@index([email])
+  @@map("users")
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@map("accounts")
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("sessions")
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+  @@map("verification_tokens")
+}
+
+model Group {
+  id          String   @id @default(cuid())
+  name        String
+  description String?
+  imageUrl    String?
+  currency    String   @default("USD")
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  // Relations
+  members     GroupMember[]
+  receipts    Receipt[]
+  fairnessReports FairnessReport[]
+  
+  @@index([createdAt])
+  @@map("groups")
+}
+
+model GroupMember {
+  id        String   @id @default(cuid())
+  role      String   @default("member") // admin, member
+  
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  groupId   String
+  group     Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  
+  joinedAt  DateTime @default(now())
+  
+  @@unique([userId, groupId])
+  @@index([groupId])
+  @@map("group_members")
+}
+
+model Receipt {
+  id          String   @id @default(cuid())
+  imageUrl    String   // S3 URL or local path
+  imageKey    String?  // S3 key for deletion
+  
+  // Parsed data
+  merchant    String?
+  total       Float
+  date        DateTime
+  currency    String   @default("USD")
+  
+  // Metadata
+  parsed      Boolean  @default(false)
+  parsedData  Json?    // Full OCR result
+  confidence  Float?   // AI confidence score
+  
+  uploadedBy  String
+  uploader    User     @relation(fields: [uploadedBy], references: [id])
+  
+  groupId     String?
+  group       Group?   @relation(fields: [groupId], references: [id], onDelete: SetNull)
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  // Relations
+  items       ReceiptItem[]
+  splits      Split[]
+  
+  @@index([groupId])
+  @@index([uploadedBy])
+  @@index([createdAt])
+  @@map("receipts")
+}
+
+model ReceiptItem {
+  id          String   @id @default(cuid())
+  name        String
+  price       Float
+  quantity    Int      @default(1)
+  category    String?
+  
+  receiptId   String
+  receipt     Receipt  @relation(fields: [receiptId], references: [id], onDelete: Cascade)
+  
+  createdAt   DateTime @default(now())
+  
+  @@index([receiptId])
+  @@map("receipt_items")
+}
+
+model Split {
+  id          String   @id @default(cuid())
+  amount      Float
+  percentage  Float?   // What % of total bill
+  description String?
+  
+  receiptId   String
+  receipt     Receipt  @relation(fields: [receiptId], references: [id], onDelete: Cascade)
+  
+  // Who paid initially
+  paidBy      String
+  payer       User     @relation(fields: [paidBy], references: [id])
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  // Relations
+  debts       Debt[]
+  
+  @@index([receiptId])
+  @@index([paidBy])
+  @@map("splits")
+}
+
+model Debt {
+  id          String   @id @default(cuid())
+  amount      Float
+  settled     Boolean  @default(false)
+  settledAt   DateTime?
+  
+  // Who owes
+  debtorId    String
+  debtor      User     @relation("Debtor", fields: [debtorId], references: [id])
+  
+  // Who is owed
+  creditorId  String
+  creditor    User     @relation("Creditor", fields: [creditorId], references: [id])
+  
+  splitId     String
+  split       Split    @relation(fields: [splitId], references: [id], onDelete: Cascade)
+  
+  // Optimization metadata
+  optimized   Boolean  @default(false)
+  originalAmount Float? // Before optimization
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  @@index([debtorId])
+  @@index([creditorId])
+  @@index([settled])
+  @@index([createdAt])
+  @@map("debts")
+}
+
+model Transaction {
+  id          String   @id @default(cuid())
+  amount      Float
+  currency    String   @default("USD")
+  status      String   @default("pending") // pending, completed, failed, cancelled
+  
+  fromUserId  String
+  fromUser    User     @relation("TransactionFrom", fields: [fromUserId], references: [id])
+  
+  toUserId    String
+  description String?
+  
+  // Payment metadata
+  paymentMethod String?  // venmo, paypal, cash, bank_transfer
+  paymentId     String?  // External payment ID
+  paymentUrl    String?  // Deep link to payment app
+  
+  createdAt   DateTime @default(now())
+  completedAt DateTime?
+  updatedAt   DateTime @updatedAt
+  
+  @@index([fromUserId])
+  @@index([toUserId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("transactions")
+}
+
+model FairnessReport {
+  id              String   @id @default(cuid())
+  
+  groupId         String
+  group           Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  
+  // Metrics
+  giniCoefficient Float
+  fairnessScore   Float    // 0-100 score
+  
+  // Detailed metrics
+  totalSpent      Float
+  avgPerPerson    Float
+  maxImbalance    Float
+  
+  // Analysis
+  insights        Json     // Array of insight strings
+  suggestions     Json     // Array of suggestion objects
+  participantStats Json    // Per-person statistics
+  
+  periodStart     DateTime
+  periodEnd       DateTime
+  generatedAt     DateTime @default(now())
+  
+  @@index([groupId])
+  @@index([generatedAt])
+  @@map("fairness_reports")
+}
+
+// Audit log for security and compliance
+model AuditLog {
+  id          String   @id @default(cuid())
+  
+  userId      String?
+  user        User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  
+  action      String   // receipt_upload, debt_calculate, user_login, etc.
+  resource    String   // receipts, debts, users, etc.
+  resourceId  String?
+  
+  metadata    Json?    // Additional context
+  ipAddress   String?
+  userAgent   String?
+  
+  success     Boolean  @default(true)
+  errorMessage String?
+  
+  createdAt   DateTime @default(now())
+  
+  @@index([userId])
+  @@index([action])
+  @@index([resource])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+// Cache for AI responses
+model AICache {
+  id          String   @id @default(cuid())
+  cacheKey    String   @unique
+  cacheType   String   // receipt_parse, debt_optimize, fairness_analyze
+  
+  input       Json     // Input that generated this cache
+  output      Json     // Cached AI response
+  
+  hitCount    Int      @default(0)
+  
+  expiresAt   DateTime
+  createdAt   DateTime @default(now())
+  lastUsedAt  DateTime @default(now())
+  
+  @@index([cacheKey])
+  @@index([cacheType])
+  @@index([expiresAt])
+  @@map("ai_cache")
+}
